@@ -1,46 +1,74 @@
+import { SmartAlertsSection } from "@/components/SmartAlertsSection";
+import { HeroSection } from "@/components/HeroSection";
+import { CropHealthSection } from "@/components/CropHealthSection";
+import { CropReportsSection } from "@/components/CropReportsSection";
+import { CropUploadSection } from "@/components/CropUploadSection";
+import { FieldManagementSection } from "@/components/FieldManagementSection";
+import { WeatherSection } from "@/components/WeatherSection";
+import { summary, weather } from "@/lib/dashboard-data";
+
+const kpis = [
+  {
+    label: "Crop Health",
+    value: `${summary.cropHealth}%`,
+    hint: "Today",
+    accent: "text-green-400",
+  },
+  {
+    label: "Alerts",
+    value: String(summary.alertCount),
+    hint: "Active notifications",
+    accent: "text-yellow-400",
+  },
+  {
+    label: "Weather",
+    value: `${weather.temperature}°C`,
+    hint: weather.condition,
+    accent: "text-blue-400",
+  },
+];
+
 export default function Home() {
   return (
-    <main className="min-h-screen bg-black text-white p-10">
-      <h1 className="text-5xl font-bold text-green-500 mb-6">
-        AgroVision AI 🌾
-      </h1>
+    <main className="min-h-screen bg-black px-5 py-8 text-white sm:px-10 sm:py-10">
+      <div className="mx-auto max-w-7xl">
+        <HeroSection />
 
-      <p className="text-xl mb-8">
-        Smart Crop Health Monitoring System
-      </p>
-
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div className="bg-zinc-900 p-6 rounded-2xl">
-          <h2 className="text-2xl font-semibold text-green-400">
-            Crop Health
-          </h2>
-          <p className="mt-4 text-4xl">78%</p>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3 sm:gap-6">
+          {kpis.map((kpi) => (
+            <div
+              key={kpi.label}
+              className="rounded-2xl border border-zinc-800 bg-zinc-900 p-5 sm:p-6"
+            >
+              <h2 className={`text-lg font-semibold sm:text-xl ${kpi.accent}`}>
+                {kpi.label}
+              </h2>
+              <p className="mt-3 text-3xl font-bold tabular-nums sm:text-4xl">
+                {kpi.value}
+              </p>
+              <p className="mt-2 text-sm text-zinc-500">{kpi.hint}</p>
+            </div>
+          ))}
         </div>
 
-        <div className="bg-zinc-900 p-6 rounded-2xl">
-          <h2 className="text-2xl font-semibold text-yellow-400">
-            Alerts
-          </h2>
-          <p className="mt-4 text-4xl">4</p>
+        <div className="mt-8 grid grid-cols-1 gap-8 lg:grid-cols-2">
+          <CropHealthSection />
+          <SmartAlertsSection />
         </div>
 
-        <div className="bg-zinc-900 p-6 rounded-2xl">
-          <h2 className="text-2xl font-semibold text-blue-400">
-            Weather
-          </h2>
-          <p className="mt-4 text-4xl">28°C</p>
+        <div className="mt-8">
+          <WeatherSection />
         </div>
-      </div>
 
-      <div className="mt-10 bg-zinc-900 p-6 rounded-2xl">
-        <h2 className="text-2xl font-bold mb-4 text-green-400">
-          Upload Crop Image
-        </h2>
+        <div className="mt-8 rounded-2xl border border-zinc-800 bg-zinc-900 p-5 sm:p-6">
+          <FieldManagementSection />
+        </div>
 
-        <input
-          type="file"
-          className="bg-zinc-800 p-3 rounded-lg"
-        />
+        <div className="mt-8 rounded-2xl border border-zinc-800 bg-zinc-900 p-5 sm:p-6">
+          <CropReportsSection />
+        </div>
+
+        <CropUploadSection healthScore={summary.cropHealth} />
       </div>
     </main>
   );
