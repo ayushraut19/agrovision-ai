@@ -8,7 +8,8 @@ type DetectionLabel =
   | "Healthy"
   | "Leaf Blight"
   | "Rust Disease"
-  | "Nutrient Deficiency";
+  | "Nutrient Deficiency"
+  | "Invalid Crop Image";
 
 type AnalysisResult = {
   disease: DetectionLabel;
@@ -17,6 +18,9 @@ type AnalysisResult = {
   recommendation: string;
   healthLabel: string;
   healthScore: number;
+  cropPresenceConfidence: number;
+  diseaseConfidence: number;
+  qualityWarning: boolean;
 };
 
 type ImageFeatures = {
@@ -29,15 +33,26 @@ type ImageFeatures = {
   lowSaturationRatio: number;
   textureDamage: number;
   edgeDamage: number;
+  edgeDensity: number;
+  edgeConsistency: number;
+  greenVariation: number;
+  organicContourScore: number;
+  cropColorDiversity: number;
   darkStreakScore: number;
   scatteredSpotScore: number;
   signature: number;
 };
 
 type ClassScore = {
-  label: DetectionLabel;
+  label: Exclude<DetectionLabel, "Invalid Crop Image">;
   score: number;
   health: number;
+};
+
+type CropPresenceResult = {
+  isCrop: boolean;
+  confidence: number;
+  qualityWarning: boolean;
 };
 
 const SCAN_DURATION_MS = 900;
@@ -143,6 +158,7 @@ function extractFeatures(
 ): ImageFeatures {
   const pixels = Math.max(1, width * height);
   const brightnessMap = new Float32Array(pixels);
+  const greenMap = new Float32Array(pixels);
   const damageMap = new Uint8Array(pixels);
   const darkMap = new Uint8Array(pixels);
 
@@ -154,6 +170,7 @@ function extractFeatures(
   let pale = 0;
   let lowSaturation = 0;
   let textureTotal = 0;
+  let saturationTotal = 0;
   let signature = 17;
 
   for (let i = 0, pixel = 0; i < data.length; i += 4, pixel += 1) {
@@ -186,7 +203,9 @@ function extractFeatures(
     if (isLowSaturation) lowSaturation += 1;
 
     textureTotal += Math.abs(g - r) * 0.45 + Math.abs(r - b) * 0.3 + saturation * (1 - brightness) * 0.25;
+    saturationTotal += saturation;
     brightnessMap[pixel] = brightness;
+    greenMap[pixel] = clamp01(g - (r + b) * 0.5 + 0.35);
     damageMap[pixel] = isDamaged ? 1 : 0;
     darkMap[pixel] = isDark ? 1 : 0;
 
@@ -194,6 +213,10 @@ function extractFeatures(
       signature = (signature * 31 + Math.round((r * 3 + g * 5 + b * 7) * 1000) + pixel) % 1000003;
     }
   }
+
+  const textureDamage = computeTextureDamage(brightnessMap, width, height, textureTotal / pixels);
+  const edgeStats = computeEdgeStats(brightnessMap, width, height);
+  const greenVariation = computeGreenVariation(greenMap, width, height);
 
   return {
     greenRatio: green / pixels,
@@ -203,11 +226,110 @@ function extractFeatures(
     darkRatio: dark / pixels,
     paleRatio: pale / pixels,
     lowSaturationRatio: lowSaturation / pixels,
-    textureDamage: computeTextureDamage(brightnessMap, width, height, textureTotal / pixels),
+    textureDamage,
     edgeDamage: computeEdgeDamage(brightnessMap, damageMap, width, height),
+    edgeDensity: edgeStats.edgeDensity,
+    edgeConsistency: edgeStats.edgeConsistency,
+    greenVariation,
+    organicContourScore: edgeStats.organicContourScore,
+    cropColorDiversity: clamp01(saturationTotal / pixels + greenVariation * 2.2),
     darkStreakScore: computeDarkStreakScore(darkMap, width, height),
     scatteredSpotScore: computeScatteredSpotScore(damageMap, width, height),
     signature: signature / 1000003,
+  };
+}
+
+function computeGreenVariation(
+  greenMap: Float32Array,
+  width: number,
+  height: number,
+) {
+  const blocks = 6;
+  const values: number[] = [];
+
+  for (let by = 0; by < blocks; by += 1) {
+    for (let bx = 0; bx < blocks; bx += 1) {
+      const startX = Math.floor((bx * width) / blocks);
+      const endX = Math.max(startX + 1, Math.floor(((bx + 1) * width) / blocks));
+      const startY = Math.floor((by * height) / blocks);
+      const endY = Math.max(startY + 1, Math.floor(((by + 1) * height) / blocks));
+      let sum = 0;
+      let count = 0;
+
+      for (let y = startY; y < endY; y += 1) {
+        for (let x = startX; x < endX; x += 1) {
+          sum += greenMap[y * width + x];
+          count += 1;
+        }
+      }
+
+      values.push(sum / Math.max(1, count));
+    }
+  }
+
+  const mean = values.reduce((total, value) => total + value, 0) / values.length;
+  const variance =
+    values.reduce((total, value) => total + (value - mean) ** 2, 0) / values.length;
+
+  return clamp01(Math.sqrt(variance));
+}
+
+function computeEdgeStats(
+  brightnessMap: Float32Array,
+  width: number,
+  height: number,
+) {
+  const blocks = 8;
+  const blockEdges = new Array<number>(blocks * blocks).fill(0);
+  const blockPixels = new Array<number>(blocks * blocks).fill(0);
+  let edgeCount = 0;
+  let strongEdgeCount = 0;
+  let checked = 0;
+
+  for (let y = 1; y < height - 1; y += 1) {
+    for (let x = 1; x < width - 1; x += 1) {
+      const i = y * width + x;
+      const gradient =
+        Math.abs(brightnessMap[i] - brightnessMap[i + 1]) +
+        Math.abs(brightnessMap[i] - brightnessMap[i - 1]) +
+        Math.abs(brightnessMap[i] - brightnessMap[i + width]) +
+        Math.abs(brightnessMap[i] - brightnessMap[i - width]);
+      const blockX = Math.min(blocks - 1, Math.floor((x / width) * blocks));
+      const blockY = Math.min(blocks - 1, Math.floor((y / height) * blocks));
+      const blockIndex = blockY * blocks + blockX;
+
+      checked += 1;
+      blockPixels[blockIndex] += 1;
+
+      if (gradient > 0.055) {
+        edgeCount += 1;
+        blockEdges[blockIndex] += 1;
+      }
+      if (gradient > 0.18) strongEdgeCount += 1;
+    }
+  }
+
+  const edgeDensity = edgeCount / Math.max(1, checked);
+  const blockRatios = blockEdges.map(
+    (count, index) => count / Math.max(1, blockPixels[index]),
+  );
+  const activeBlocks = blockRatios.filter((ratio) => ratio > 0.025).length;
+  const mean =
+    blockRatios.reduce((total, value) => total + value, 0) / blockRatios.length;
+  const variance =
+    blockRatios.reduce((total, value) => total + (value - mean) ** 2, 0) /
+    blockRatios.length;
+  const consistency = clamp01(1 - Math.sqrt(variance) * 7);
+  const organicContourScore = clamp01(
+    softScore(edgeDensity, 0.025, 0.13) * 0.45 +
+      softScore(strongEdgeCount / Math.max(1, checked), 0.006, 0.06) * 0.25 +
+      (activeBlocks / blockRatios.length) * 0.3,
+  );
+
+  return {
+    edgeDensity: clamp01(edgeDensity),
+    edgeConsistency: edgeDensity < 0.012 ? 0 : consistency,
+    organicContourScore,
   };
 }
 
@@ -409,6 +531,62 @@ function scoreImage(features: ImageFeatures): ClassScore[] {
   return scores.sort((a, b) => b.score - a.score);
 }
 
+function detectCropPresence(features: ImageFeatures): CropPresenceResult {
+  const greenPresence = softScore(
+    features.greenRatio + features.yellowRatio * 0.35 + features.paleRatio * 0.25,
+    0.1,
+    0.38,
+  );
+  const greenVariation = softScore(features.greenVariation, 0.018, 0.075);
+  const texturePattern = softScore(features.textureDamage, 0.045, 0.18);
+  const edgeDensity = softScore(features.edgeDensity, 0.025, 0.12);
+  const colorDiversity = softScore(features.cropColorDiversity, 0.16, 0.42);
+  const organicContours =
+    features.organicContourScore * 0.7 + features.edgeConsistency * 0.3;
+
+  const flatPenalty =
+    (features.greenRatio > 0.82 &&
+      features.greenVariation < 0.025 &&
+      features.edgeDensity < 0.04) ||
+    (features.textureDamage < 0.045 && features.edgeDensity < 0.018) ||
+    features.cropColorDiversity < 0.08
+      ? 24
+      : 0;
+
+  const confidence = Math.round(
+    clamp(
+      (greenPresence * 0.22 +
+        greenVariation * 0.2 +
+        texturePattern * 0.18 +
+        edgeDensity * 0.16 +
+        organicContours * 0.14 +
+        colorDiversity * 0.1) *
+        100 -
+        flatPenalty,
+      0,
+      99,
+    ),
+  );
+
+  const tooFlat =
+    features.textureDamage < 0.045 ||
+    features.edgeDensity < 0.018 ||
+    features.greenVariation < 0.014;
+  const artificialSolidGreen =
+    features.greenRatio > 0.82 &&
+    features.greenVariation < 0.025 &&
+    features.edgeDensity < 0.04;
+
+  return {
+    confidence,
+    isCrop:
+      confidence >= 48 &&
+      !artificialSolidGreen &&
+      !(tooFlat && features.cropColorDiversity < 0.14),
+    qualityWarning: confidence < 62 || tooFlat,
+  };
+}
+
 function validateWinner(winner: ClassScore, scores: ClassScore[], features: ImageFeatures) {
   const totalDamage =
     features.brownRatio + features.orangeRatio + features.darkRatio + features.yellowRatio * 0.55;
@@ -427,13 +605,16 @@ function validateWinner(winner: ClassScore, scores: ClassScore[], features: Imag
   if (
     weightedHealth > 82 &&
     features.greenRatio > 0.58 &&
+    features.greenVariation > 0.035 &&
     features.brownRatio < 0.08 &&
     features.orangeRatio < 0.035 &&
     features.yellowRatio < 0.12 &&
     features.darkRatio < 0.07 &&
     totalDamage < 0.12 &&
+    features.textureDamage >= 0.045 &&
     features.textureDamage < 0.2 &&
-    features.edgeDamage < 0.22
+    features.edgeDamage < 0.22 &&
+    features.cropColorDiversity > 0.18
   ) {
     return scores.find((score) => score.label === "Healthy") ?? winner;
   }
@@ -480,20 +661,71 @@ function computeConfidence(scores: ClassScore[], winner: ClassScore, features: I
   return Math.round(clamp(64 + evidence * 22 + margin * 36 + imageQuality * 6 - ambiguityPenalty, 58, 96));
 }
 
+function buildRecommendation(
+  disease: DetectionLabel,
+  severity: AnalysisResult["severity"],
+  healthScore: number,
+) {
+  if (disease === "Invalid Crop Image") {
+    return "Please upload a clearer crop or leaf image.";
+  }
+
+  if (disease === "Healthy") {
+    return healthScore > 90
+      ? "Crop looks healthy. Maintain irrigation, nutrition, and weekly scouting."
+      : "Crop appears stable. Keep monitoring new leaves and avoid overwatering.";
+  }
+
+  const urgency =
+    severity === "High"
+      ? "Act within 24 hours."
+      : severity === "Moderate"
+        ? "Treat soon and rescan after 48 hours."
+        : "Monitor closely before it spreads.";
+
+  const advice: Record<Exclude<DetectionLabel, "Invalid Crop Image">, string> = {
+    Healthy: "",
+    "Leaf Blight":
+      "Remove affected leaves, avoid overhead watering, and apply a suitable fungicide.",
+    "Rust Disease":
+      "Improve airflow, separate heavily affected plants, and use rust-focused treatment.",
+    "Nutrient Deficiency":
+      "Check soil nutrients and apply balanced NPK with micronutrients gradually.",
+  };
+
+  return `${urgency} ${advice[disease]}`;
+}
+
 async function analyzeImage(file: File): Promise<AnalysisResult> {
   const { data, width, height } = await getImageData(file);
   const features = extractFeatures(data, width, height);
+  const cropPresence = detectCropPresence(features);
+
+  if (!cropPresence.isCrop) {
+    return {
+      disease: "Invalid Crop Image",
+      severity: "Low",
+      confidence: cropPresence.confidence,
+      recommendation: buildRecommendation("Invalid Crop Image", "Low", 0),
+      healthLabel: "Needs clearer crop image",
+      healthScore: 0,
+      cropPresenceConfidence: cropPresence.confidence,
+      diseaseConfidence: 0,
+      qualityWarning: true,
+    };
+  }
+
   const scores = scoreImage(features);
   const winner = validateWinner(scores[0], scores, features);
-  const confidence = computeConfidence(scores, winner, features);
+  const diseaseConfidence = computeConfidence(scores, winner, features);
   const healthScore = Math.round(clamp(winner.health, 30, 98));
   const severity = healthScore >= 78 ? "Low" : healthScore >= 58 ? "Moderate" : "High";
 
   return {
     disease: winner.label,
     severity,
-    confidence,
-    recommendation: "",
+    confidence: diseaseConfidence,
+    recommendation: buildRecommendation(winner.label, severity, healthScore),
     healthLabel:
       healthScore >= 85
         ? "Strong health"
@@ -501,11 +733,14 @@ async function analyzeImage(file: File): Promise<AnalysisResult> {
           ? "Needs monitoring"
           : "At risk",
     healthScore,
+    cropPresenceConfidence: cropPresence.confidence,
+    diseaseConfidence,
+    qualityWarning: cropPresence.qualityWarning,
   };
 }
 
 export function CropUploadSection() {
-  const { t } = useLanguage();
+  const { language, t } = useLanguage();
   const inputRef = useRef<HTMLInputElement>(null);
   const previewRef = useRef<string | null>(null);
   const scanTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -694,10 +929,14 @@ export function CropUploadSection() {
           <article className="rounded-xl border border-green-600/30 bg-zinc-950/80 p-4">
             <h3 className="text-sm text-green-400">{t.analysis.healthScore}</h3>
             <p className="mt-2 text-4xl font-bold text-green-400">
-              {analysis.healthScore}%
+              {analysis.disease === "Invalid Crop Image"
+                ? "--"
+                : `${analysis.healthScore}%`}
             </p>
             <p className="mt-1 text-xs text-zinc-500">
-              {analysis.healthScore >= 85
+              {analysis.disease === "Invalid Crop Image"
+                ? t.diseases["Invalid Crop Image"]
+                : analysis.healthScore >= 85
                 ? t.analysis.strong
                 : analysis.healthScore >= 65
                   ? t.analysis.monitoring
@@ -706,27 +945,45 @@ export function CropUploadSection() {
             <div className="mt-4 h-2 rounded-full bg-zinc-800">
               <div
                 className={`h-full rounded-full ${healthBarColor(analysis.healthScore)}`}
-                style={{ width: `${analysis.healthScore}%` }}
+                style={{
+                  width:
+                    analysis.disease === "Invalid Crop Image"
+                      ? "0%"
+                      : `${analysis.healthScore}%`,
+                }}
               />
             </div>
+            <p className="mt-3 text-xs text-zinc-500">
+              {t.analysis.cropPresenceConfidence}:{" "}
+              {analysis.cropPresenceConfidence}%
+            </p>
           </article>
           <article className="rounded-xl border border-zinc-700 bg-zinc-950/80 p-4">
-            <h3 className="text-sm text-zinc-400">{t.analysis.analysis}</h3>
+            <div className="flex items-start justify-between gap-2">
+              <h3 className="text-sm text-zinc-400">{t.analysis.analysis}</h3>
+              {analysis.qualityWarning ? (
+                <span className="rounded-full border border-yellow-500/30 bg-yellow-500/10 px-2 py-0.5 text-xs font-medium text-yellow-400">
+                  {t.analysis.poorQuality}
+                </span>
+              ) : null}
+            </div>
             <p className="mt-2 text-lg font-semibold text-zinc-100">
               {t.diseases[analysis.disease]}
             </p>
-            <p className="mt-2 text-sm text-zinc-400">
-              {t.analysis.severity}:{" "}
-              <span className="text-yellow-400">
-                {analysis.severity === "Low"
-                  ? t.analysis.low
-                  : analysis.severity === "Moderate"
-                    ? t.analysis.moderate
-                    : t.analysis.high}
-              </span>
-            </p>
+            {analysis.disease !== "Invalid Crop Image" ? (
+              <p className="mt-2 text-sm text-zinc-400">
+                {t.analysis.severity}:{" "}
+                <span className="text-yellow-400">
+                  {analysis.severity === "Low"
+                    ? t.analysis.low
+                    : analysis.severity === "Moderate"
+                      ? t.analysis.moderate
+                      : t.analysis.high}
+                </span>
+              </p>
+            ) : null}
             <p className="mt-2 text-xs text-zinc-500">
-              {t.analysis.confidence}: {analysis.confidence}%
+              {t.analysis.diseaseConfidence}: {analysis.diseaseConfidence}%
             </p>
           </article>
           <article className="rounded-xl border border-emerald-600/25 bg-zinc-950/80 p-4">
@@ -734,7 +991,9 @@ export function CropUploadSection() {
               {t.analysis.recommendation}
             </h3>
             <p className="mt-2 text-sm text-zinc-300">
-              {t.recommendations[analysis.disease]}
+              {language === "en"
+                ? analysis.recommendation
+                : t.recommendations[analysis.disease]}
             </p>
           </article>
         </div>
